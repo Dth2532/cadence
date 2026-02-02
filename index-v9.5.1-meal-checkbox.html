@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<!-- Cadence v9.4 - Dark Theme -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Know Your Habits to Know Yourself">
+  <meta name="theme-color" content="#667eea">
+  <title>Cadence</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon-192.png">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { 
+      margin: 0; 
+      padding: 0; 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    
+    .app-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    
+    @media (min-width: 768px) {
+      .app-grid {
+        grid-template-columns: minmax(250px, 300px) 1fr;
+      }
+      .priority-sidebar {
+        position: sticky;
+        top: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('service-worker.js').catch(e => console.log('SW failed'));
+    }
+    if (!window.storage) {
+      window.storage = {
+        async get(key) {
+          const v = localStorage.getItem(key);
+          return v ? { key, value: v } : null;
+        },
+        async set(key, value) {
+          localStorage.setItem(key, value);
+          return { key, value };
+        }
+      };
+    }
+
+    window.taskCounts = {};
+    window.foodCounts = {};
+    
+    async function initializeCounts() {
+      const taskFreq = {};
+      const foodFreq = {};
+      
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        
+        if (key && key.startsWith('tasks:')) {
+          try {
+            const data = localStorage.getItem(key);
+            const tasks = JSON.parse(data);
+            tasks.forEach(task => {
+              const normalized = task.text.toLowerCase().trim();
+              taskFreq[normalized] = (taskFreq[normalized] || 0) + 1;
+            });
+          } catch {}
+        }
+        
+        if (key && key.startsWith('foods:')) {
+          try {
+            const data = localStorage.getItem(key);
+            const foods = JSON.parse(data);
+            foods.forEach(food => {
+              const normalized = food.text.toLowerCase().trim();
+              foodFreq[normalized] = (foodFreq[normalized] || 0) + 1;
+            });
+          } catch {}
+        }
+      }
+      
+      window.taskCounts = taskFreq;
+      window.foodCounts = foodFreq;
+    }
+    
+    initializeCounts();
+  </script>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    
+    function App() {
+      const [tasks, setTasks] = useState([]);
+      const [foods, setFoods] = useState([]);
+      const [bedtime, setBedtime] = useState('');
+      const [priorityTasks, setPriorityTasks] = useState([]);
+      const [selectedDate, setSelectedDate] = useState('');
+      const [activeView, setActiveView] = useState('today');
+      const [activeTab, setActiveTab] = useState('tasks');
+      const [inputs, setInputs] = useState({ task: '', food: '', bedtime: '', priority: '', protein: '', isMeal: false });
+      const [loading, setLoading] = useState(true);
+      const [currentMonth, setCurrentMonth] = useState(new Date());
+      const [calendarData, setCalendarData] = useState({});
+      const [monthlyStats, setMonthlyStats] = useState(null);
+      const [calendarLoading, setCalendarLoading] = useState(false);
+      const [countsVersion, setCountsVersion] = useState(0);
+      const [showPriority, setShowPriority] = useState(true);
+      const today = (() => {
+        const d = new Date();
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return year + '-' + month + '-' + day;
+      })();
+
+      useEffect(() => {
+        loadData();
+      }, []);
+
+      useEffect(() => {
+        if (activeView === 'calendar') {
+          loadCalendarData();
+        }
+      }, [activeView, currentMonth]);
+
+      async function loadData() {
+        try {
+          const tasksResult = await window.storage.get(`tasks:${today}`);
+          const foodsResult = await window.storage.get(`foods:${today}`);
+          const bedtimeResult = await window.storage.get(`bedtime:${today}`);
+          const priorityResult = await window.storage.get('priority-tasks');
+          
+          if (tasksResult) setTasks(JSON.parse(tasksResult.value));
+          if (foodsResult) setFoods(JSON.parse(foodsResult.value));
+          if (bedtimeResult) setBedtime(bedtimeResult.value);
+          if (priorityResult) setPriorityTasks(JSON.parse(priorityResult.value));
+        } catch (e) {
+          console.log('Load failed:', e);
+        }
+        setLoading(false);
+      }
+
+      function refreshCounts() {
+        initializeCounts().then(() => {
+          setCountsVersion(v => v + 1);
+        });
+      }
+
+      async function loadCalendarData() {
+        setCalendarLoading(true);
+        const year = currentMonth.getFullYear();
+        const month = currentMonth.getMonth();
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+        const data = {};
+        
+        // Monthly stats
+        const taskFreq = {};
+        const foodFreq = {};
+        let totalTasks = 0;
+        let totalFoods = 0;
+        let daysTracked = 0;
+        const bedtimesList = [];
+
+        for (let day = 1; day <= daysInMonth; day++) {
+          const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          try {
+            const tasksResult = await window.storage.get(`tasks:${dateStr}`);
+            const foodsResult = await window.storage.get(`foods:${dateStr}`);
+            const bedtimeResult = await window.storage.get(`bedtime:${dateStr}`);
+
+            const hasTasks = tasksResult && JSON.parse(tasksResult.value).length > 0;
+            const hasFoods = foodsResult && JSON.parse(foodsResult.value).length > 0;
+            const hasBedtime = !!bedtimeResult;
+
+            data[day] = {
+              hasTasks,
+              hasFoods,
+              hasBedtime
+            };
+
+            if (hasTasks || hasFoods || hasBedtime) daysTracked++;
+
+            // Count task frequencies
+            if (tasksResult) {
+              const dayTasks = JSON.parse(tasksResult.value);
+              totalTasks += dayTasks.length;
+              dayTasks.forEach(t => {
+                const key = t.text.toLowerCase().trim();
+                taskFreq[key] = (taskFreq[key] || 0) + 1;
+              });
+            }
+
+            // Count food frequencies
+            if (foodsResult) {
+              const dayFoods = JSON.parse(foodsResult.value);
+              totalFoods += dayFoods.length;
+              dayFoods.forEach(f => {
+                const key = f.text.toLowerCase().trim();
+                foodFreq[key] = (foodFreq[key] || 0) + 1;
+              });
+            }
+
+            // Collect bedtimes with dates
+            if (bedtimeResult) {
+              bedtimesList.push({ date: day, time: bedtimeResult.value });
+            }
+          } catch {
+            data[day] = { hasTasks: false, hasFoods: false, hasBedtime: false };
+          }
+        }
+
+        // Get top 3 tasks and foods
+        const topTasks = Object.entries(taskFreq)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3);
+        
+        const topFoods = Object.entries(foodFreq)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3);
+
+        setMonthlyStats({
+          daysTracked,
+          totalDays: daysInMonth,
+          totalTasks,
+          totalFoods,
+          topTasks,
+          topFoods,
+          bedtimesList
+        });
+
+        setCalendarData(data);
+        setCalendarLoading(false);
+      }
+
+      async function addPriorityTask() {
+        if (!inputs.priority.trim()) return;
+        const newTask = { 
+          id: Date.now(), 
+          text: inputs.priority,
+          completed: false
+        };
+        const updated = [...priorityTasks, newTask];
+        setPriorityTasks(updated);
+        await window.storage.set('priority-tasks', JSON.stringify(updated));
+        setInputs({ ...inputs, priority: '' });
+      }
+
+      async function togglePriorityTask(id) {
+        const updated = priorityTasks.map(t => 
+          t.id === id ? { ...t, completed: !t.completed } : t
+        );
+        setPriorityTasks(updated);
+        await window.storage.set('priority-tasks', JSON.stringify(updated));
+      }
+
+      async function deletePriorityTask(id) {
+        const updated = priorityTasks.filter(t => t.id !== id);
+        setPriorityTasks(updated);
+        await window.storage.set('priority-tasks', JSON.stringify(updated));
+      }
+
+      async function addTask() {
+        if (!inputs.task.trim()) return;
+        const targetDate = selectedDate || today;
+        const newTask = { 
+          id: Date.now(), 
+          text: inputs.task, 
+          time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) 
+        };
+        
+        // Load existing tasks for the target date
+        const existingResult = await window.storage.get('tasks:' + targetDate);
+        const existingTasks = existingResult ? JSON.parse(existingResult.value) : [];
+        const updated = [...existingTasks, newTask];
+        
+        await window.storage.set('tasks:' + targetDate, JSON.stringify(updated));
+        
+        // If adding to today, update the display
+        if (targetDate === today) {
+          setTasks(updated);
+        }
+        
+        setInputs({ ...inputs, task: '' });
+        setSelectedDate(''); // Reset date picker
+        refreshCounts();
+      }
+
+      async function deleteTask(id) {
+        const updated = tasks.filter(t => t.id !== id);
+        setTasks(updated);
+        await window.storage.set(`tasks:${today}`, JSON.stringify(updated));
+        refreshCounts();
+      }
+
+      async function addFood() {
+        if (!inputs.food.trim()) return;
+        const targetDate = selectedDate || today;
+        const newFood = { 
+          id: Date.now(), 
+          text: inputs.food,
+          protein: inputs.protein ? parseInt(inputs.protein) : null,
+          isMeal: inputs.isMeal,
+          time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) 
+        };
+        
+        // Load existing foods for the target date
+        const existingResult = await window.storage.get('foods:' + targetDate);
+        const existingFoods = existingResult ? JSON.parse(existingResult.value) : [];
+        const updated = [...existingFoods, newFood];
+        
+        await window.storage.set('foods:' + targetDate, JSON.stringify(updated));
+        
+        // If adding to today, update the display
+        if (targetDate === today) {
+          setFoods(updated);
+        }
+        
+        setInputs({ ...inputs, food: '', protein: '', isMeal: false });
+        setSelectedDate(''); // Reset date picker
+        refreshCounts();
+      }
+
+      async function deleteFood(id) {
+        const updated = foods.filter(f => f.id !== id);
+        setFoods(updated);
+        await window.storage.set(`foods:${today}`, JSON.stringify(updated));
+        refreshCounts();
+      }
+
+      async function saveBedtime() {
+        if (!inputs.bedtime) return;
+        setBedtime(inputs.bedtime);
+        await window.storage.set(`bedtime:${today}`, inputs.bedtime);
+      }
+
+      function previousMonth() {
+        setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1));
+      }
+
+      function nextMonth() {
+        setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1));
+      }
+
+      function getCalendarDays() {
+        const year = currentMonth.getFullYear();
+        const month = currentMonth.getMonth();
+        const firstDay = new Date(year, month, 1).getDay();
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+        
+        return { firstDay, daysInMonth };
+      }
+
+      function getTaskCount(taskText) {
+        const normalized = taskText.toLowerCase().trim();
+        return window.taskCounts[normalized] || 1;
+      }
+
+      function getFoodCount(foodText) {
+        const normalized = foodText.toLowerCase().trim();
+        return window.foodCounts[normalized] || 1;
+      }
+
+      if (loading) {
+        return <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)'}}>
+          <div style={{color:'white',fontSize:'18px'}}>Loading...</div>
+        </div>;
+      }
+
+      const { firstDay, daysInMonth } = getCalendarDays();
+      const monthName = currentMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+      return (
+        <div style={{minHeight:'100vh',background:'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',padding:'12px'}}>
+          <div className="app-grid">
+            
+            {/* Priority Tasks Sidebar */}
+            <div className="priority-sidebar" style={{background:'#1e293b',borderRadius:'12px',padding:'16px',boxShadow:'0 4px 20px rgba(0,0,0,0.1)',height:'fit-content'}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'16px'}}>
+                <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                  <span style={{fontSize:'20px'}}>⭐</span>
+                  <h2 style={{margin:0,fontSize:'18px',fontWeight:'700',color:'#f1f5f9'}}>Priority</h2>
+                </div>
+                <button 
+                  onClick={() => setShowPriority(!showPriority)}
+                  style={{display:'block',background:'transparent',border:'1px solid #475569',padding:'4px 8px',borderRadius:'6px',fontSize:'12px',cursor:'pointer',color:'#cbd5e1'}}
+                  className="mobile-only"
+                >
+                  {showPriority ? '▼' : '▶'}
+                </button>
+              </div>
+              
+              {showPriority && (
+                <>
+                  <div style={{marginBottom:'16px'}}>
+                    <input 
+                      type="text" 
+                      value={inputs.priority} 
+                      onChange={(e) => setInputs({...inputs, priority: e.target.value})} 
+                      onKeyPress={(e) => e.key === 'Enter' && addPriorityTask()} 
+                      placeholder="What's important?" 
+                      style={{width:'100%',padding:'10px',border:'1px solid #475569',borderRadius:'8px',fontSize:'13px',marginBottom:'8px'}} 
+                    />
+                    <button onClick={addPriorityTask} style={{background:'#f59e0b',color:'white',border:'none',padding:'10px',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:'pointer',width:'100%'}}>
+                      Add Priority
+                    </button>
+                  </div>
+
+                  <div style={{display:'flex',flexDirection:'column',gap:'8px'}}>
+                    {priorityTasks.length === 0 ? (
+                      <p style={{textAlign:'center',color:'#94a3b8',padding:'20px 8px',fontSize:'13px',fontStyle:'italic'}}>No priority tasks yet</p>
+                    ) : (
+                      priorityTasks.map(task => (
+                        <div key={task.id} style={{display:'flex',alignItems:'flex-start',gap:'8px',padding:'10px',background:task.completed?'#14532d':'#5b21b6',borderRadius:'8px',border:task.completed?'1px solid #22c55e':'1px solid #8b5cf6'}}>
+                          <input 
+                            type="checkbox" 
+                            checked={task.completed} 
+                            onChange={() => togglePriorityTask(task.id)}
+                            style={{marginTop:'2px',cursor:'pointer',accentColor:'#f59e0b',width:'16px',height:'16px',flexShrink:0}}
+                          />
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontSize:'13px',fontWeight:'500',color:'white',wordBreak:'break-word',textDecoration:task.completed?'line-through':'none',opacity:task.completed?0.6:1}}>
+                              {task.text}
+                            </div>
+                          </div>
+                          <button onClick={() => deletePriorityTask(task.id)} style={{background:'none',border:'none',cursor:'pointer',padding:'0',color:'#94a3b8',fontSize:'16px',flexShrink:0}}>×</button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  {priorityTasks.length > 0 && (
+                    <div style={{marginTop:'12px',padding:'10px',background:'#2d3748',borderRadius:'8px',fontSize:'11px',color:'#cbd5e1',textAlign:'center'}}>
+                      {priorityTasks.filter(t => !t.completed).length} of {priorityTasks.length} remaining
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Main Content */}
+            <div>
+              {/* Header */}
+              <div style={{background:'#1e293b',borderRadius:'12px',padding:'16px',marginBottom:'12px',boxShadow:'0 4px 20px rgba(0,0,0,0.1)'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px',flexWrap:'wrap',gap:'12px'}}>
+                  <div style={{flex:'1',minWidth:'200px',display:'flex',alignItems:'center',gap:'12px'}}>
+                    <svg width="40" height="40" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" style={{flexShrink:0}}>
+                      <defs>
+                        <linearGradient id="cadenceGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                          <stop offset="0%" style={{stopColor:'#667eea',stopOpacity:1}} />
+                          <stop offset="100%" style={{stopColor:'#764ba2',stopOpacity:1}} />
+                        </linearGradient>
+                        <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+                          <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
+                          <feOffset dx="0" dy="2" result="offsetblur"/>
+                          <feComponentTransfer>
+                            <feFuncA type="linear" slope="0.2"/>
+                          </feComponentTransfer>
+                          <feMerge>
+                            <feMergeNode/>
+                            <feMergeNode in="SourceGraphic"/>
+                          </feMerge>
+                        </filter>
+                      </defs>
+                      <circle cx="60" cy="60" r="55" fill="url(#cadenceGradient)" opacity="0.1"/>
+                      <path d="M 20 40 Q 40 30, 60 40 T 100 40" stroke="url(#cadenceGradient)" strokeWidth="10" fill="none" strokeLinecap="round" filter="url(#shadow)"/>
+                      <path d="M 20 60 Q 40 50, 60 60 T 100 60" stroke="url(#cadenceGradient)" strokeWidth="10" fill="none" strokeLinecap="round" opacity="0.7" filter="url(#shadow)"/>
+                      <path d="M 20 80 Q 40 70, 60 80 T 100 80" stroke="url(#cadenceGradient)" strokeWidth="10" fill="none" strokeLinecap="round" opacity="0.5" filter="url(#shadow)"/>
+                    </svg>
+                    <div>
+                      <h1 style={{margin:'0 0 4px 0',fontSize:'clamp(20px, 5vw, 32px)',fontWeight:'700',color:'#f1f5f9'}}>Cadence</h1>
+                      <p style={{margin:'0 0 4px 0',color:'#cbd5e1',fontSize:'clamp(11px, 3vw, 14px)'}}>Know Your Habits to Know Yourself</p>
+                      <p style={{margin:'0',color:'#94a3b8',fontSize:'clamp(10px, 2.5vw, 12px)'}}>{new Date().toLocaleDateString('en-US', {weekday:'long',month:'short',day:'numeric'})}</p>
+                    </div>
+                  </div>
+                  <div style={{display:'flex',gap:'8px',flexShrink:0}}>
+                    <button onClick={() => setActiveView('today')} style={{background:activeView==='today'?'#dbeafe':'transparent',color:activeView==='today'?'#1e40af':'#999',border:'1px solid #475569',padding:'8px 12px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',whiteSpace:'nowrap'}}>
+                      Today
+                    </button>
+                    <button onClick={() => setActiveView('calendar')} style={{background:activeView==='calendar'?'#dbeafe':'transparent',color:activeView==='calendar'?'#1e40af':'#999',border:'1px solid #475569',padding:'8px 12px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',whiteSpace:'nowrap'}}>
+                      Calendar
+                    </button>
+                  </div>
+                </div>
+                
+                {activeView === 'today' && (
+                  <div style={{display:'flex',gap:'4px',borderBottom:'1px solid #e5e7eb',overflowX:'auto',WebkitOverflowScrolling:'touch'}}>
+                    <button onClick={() => setActiveTab('tasks')} style={{background:'transparent',border:'none',padding:'10px 12px',fontSize:'13px',fontWeight:'500',color:activeTab==='tasks'?'#667eea':'#999',borderBottom:activeTab==='tasks'?'2px solid #667eea':'2px solid transparent',marginBottom:'-1px',cursor:'pointer',whiteSpace:'nowrap',flexShrink:0}}>
+                      Tasks
+                    </button>
+                    <button onClick={() => setActiveTab('food')} style={{background:'transparent',border:'none',padding:'10px 12px',fontSize:'13px',fontWeight:'500',color:activeTab==='food'?'#667eea':'#999',borderBottom:activeTab==='food'?'2px solid #667eea':'2px solid transparent',marginBottom:'-1px',cursor:'pointer',whiteSpace:'nowrap',flexShrink:0}}>
+                      Food
+                    </button>
+                    <button onClick={() => setActiveTab('sleep')} style={{background:'transparent',border:'none',padding:'10px 12px',fontSize:'13px',fontWeight:'500',color:activeTab==='sleep'?'#667eea':'#999',borderBottom:activeTab==='sleep'?'2px solid #667eea':'2px solid transparent',marginBottom:'-1px',cursor:'pointer',whiteSpace:'nowrap',flexShrink:0}}>
+                      Sleep
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {activeView === 'today' && (
+                <>
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(100px, 1fr))',gap:'12px',marginBottom:'12px'}}>
+                    <div style={{background:'#1e293b',borderRadius:'12px',padding:'12px',boxShadow:'0 2px 8px rgba(0,0,0,0.1)'}}>
+                      <div style={{fontSize:'10px',fontWeight:'600',color:'#94a3b8',marginBottom:'4px',textTransform:'uppercase'}}>Tasks</div>
+                      <div style={{fontSize:'24px',fontWeight:'700',color:'#f1f5f9'}}>{tasks.length}</div>
+                    </div>
+                    <div style={{background:'#1e293b',borderRadius:'12px',padding:'12px',boxShadow:'0 2px 8px rgba(0,0,0,0.1)'}}>
+                      <div style={{fontSize:'10px',fontWeight:'600',color:'#94a3b8',marginBottom:'4px',textTransform:'uppercase'}}>Meals</div>
+                      <div style={{fontSize:'24px',fontWeight:'700',color:'#f1f5f9'}}>{foods.filter(f => f.isMeal).length}</div>
+                    </div>
+                    <div style={{background:'#1e293b',borderRadius:'12px',padding:'12px',boxShadow:'0 2px 8px rgba(0,0,0,0.1)'}}>
+                      <div style={{fontSize:'10px',fontWeight:'600',color:'#94a3b8',marginBottom:'4px',textTransform:'uppercase'}}>Protein</div>
+                      <div style={{fontSize:'24px',fontWeight:'700',color:'#86efac'}}>{foods.reduce((sum, f) => sum + (f.protein || 0), 0)}g</div>
+                    </div>
+                    <div style={{background:'#1e293b',borderRadius:'12px',padding:'12px',boxShadow:'0 2px 8px rgba(0,0,0,0.1)'}}>
+                      <div style={{fontSize:'10px',fontWeight:'600',color:'#94a3b8',marginBottom:'4px',textTransform:'uppercase'}}>Bedtime</div>
+                      <div style={{fontSize:'18px',fontWeight:'700',color:'#f1f5f9',fontFamily:'monospace'}}>
+                        {bedtime ? new Date(`2000-01-01T${bedtime}`).toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit',hour12:true}) : '—'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {activeTab === 'tasks' && (
+                    <div style={{background:'#1e293b',borderRadius:'12px',padding:'16px',boxShadow:'0 4px 20px rgba(0,0,0,0.1)'}}>
+                      <h2 style={{margin:'0 0 16px 0',fontSize:'18px',fontWeight:'600',color:'white'}}>Completed Tasks</h2>
+                      <div style={{display:'flex',gap:'8px',marginBottom:'16px',flexDirection:'column'}}>
+                        <label style={{fontSize:'12px',fontWeight:'600',color:'#cbd5e1',marginBottom:'-4px'}}>Assign Date (optional)</label>
+                        <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} placeholder="Date (optional)" style={{width:'100%',padding:'12px',border:'1px solid #475569',borderRadius:'8px',fontSize:'14px',background:'#334155',color:'#f1f5f9'}} />
+                        <input type="text" value={inputs.task} onChange={(e) => setInputs({...inputs, task: e.target.value})} onKeyPress={(e) => e.key === 'Enter' && addTask()} placeholder="What did you accomplish?" style={{width:'100%',padding:'12px',border:'1px solid #475569',borderRadius:'8px',fontSize:'14px',background:'#334155',color:'#f1f5f9'}} />
+                        <button onClick={addTask} style={{background:'#667eea',color:'white',border:'none',padding:'12px',borderRadius:'8px',fontSize:'14px',fontWeight:'600',cursor:'pointer',width:'100%'}}>
+                          {selectedDate ? 'Add to ' + selectedDate : 'Add Task'}
+                        </button>
+                      </div>
+                      <div style={{display:'flex',flexDirection:'column',gap:'8px'}}>
+                        {tasks.length === 0 ? <p style={{textAlign:'center',color:'#94a3b8',padding:'32px 16px',fontSize:'14px'}}>No tasks yet!</p> : tasks.map(task => {
+                          const count = getTaskCount(task.text);
+                          return (
+                            <div key={task.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px',background:'#2d3748',borderRadius:'8px',border:'1px solid #475569'}}>
+                              <div style={{flex:1,minWidth:0}}>
+                                <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'4px',flexWrap:'wrap'}}>
+                                  <div style={{fontSize:'14px',fontWeight:'500',color:'#f1f5f9',wordBreak:'break-word'}}>{task.text}</div>
+                                  {count > 1 && <span style={{fontSize:'11px',fontWeight:'600',color:'#667eea',background:'#dbeafe',padding:'2px 6px',borderRadius:'8px',whiteSpace:'nowrap'}}>{count}×</span>}
+                                </div>
+                                <div style={{fontSize:'12px',color:'#94a3b8'}}>{task.time}</div>
+                              </div>
+                              <button onClick={() => deleteTask(task.id)} style={{background:'none',border:'none',cursor:'pointer',padding:'8px',color:'#94a3b8',fontSize:'20px',flexShrink:0,marginLeft:'8px'}}>×</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {activeTab === 'food' && (
+                    <div style={{background:'#1e293b',borderRadius:'12px',padding:'16px',boxShadow:'0 4px 20px rgba(0,0,0,0.1)'}}>
+                      <h2 style={{margin:'0 0 16px 0',fontSize:'18px',fontWeight:'600',color:'white'}}>Food Log</h2>
+                      <div style={{display:'flex',gap:'8px',marginBottom:'16px',flexDirection:'column'}}>
+                        <label style={{fontSize:'12px',fontWeight:'600',color:'#cbd5e1',marginBottom:'-4px'}}>Assign Date (optional)</label>
+                        <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} placeholder="Date (optional)" style={{width:'100%',padding:'12px',border:'1px solid #475569',borderRadius:'8px',fontSize:'14px',background:'#334155',color:'#f1f5f9'}} />
+                        <input type="text" value={inputs.food} onChange={(e) => setInputs({...inputs, food: e.target.value})} onKeyPress={(e) => e.key === 'Enter' && addFood()} placeholder="What did you eat?" style={{width:'100%',padding:'12px',border:'1px solid #475569',borderRadius:'8px',fontSize:'14px',background:'#334155',color:'#f1f5f9'}} />
+                        <input type="number" value={inputs.protein} onChange={(e) => setInputs({...inputs, protein: e.target.value})} onKeyPress={(e) => e.key === 'Enter' && addFood()} placeholder="Protein (g) - optional" style={{width:'100%',padding:'12px',border:'1px solid #475569',borderRadius:'8px',fontSize:'14px',background:'#334155',color:'#f1f5f9'}} />
+                        <label style={{display:'flex',alignItems:'center',gap:'8px',fontSize:'14px',color:'#cbd5e1',cursor:'pointer'}}>
+                          <input type="checkbox" checked={inputs.isMeal} onChange={(e) => setInputs({...inputs, isMeal: e.target.checked})} style={{width:'18px',height:'18px',cursor:'pointer',accentColor:'#667eea'}} />
+                          Count as a meal
+                        </label>
+                        <button onClick={addFood} style={{background:'#667eea',color:'white',border:'none',padding:'12px',borderRadius:'8px',fontSize:'14px',fontWeight:'600',cursor:'pointer',width:'100%'}}>
+                          {selectedDate ? 'Add to ' + selectedDate : 'Add Food'}
+                        </button>
+                      </div>
+                      <div style={{display:'flex',flexDirection:'column',gap:'8px'}}>
+                        {foods.length === 0 ? <p style={{textAlign:'center',color:'#94a3b8',padding:'32px 16px',fontSize:'14px'}}>No meals yet!</p> : foods.map(food => {
+                          const count = getFoodCount(food.text);
+                          return (
+                            <div key={food.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px',background:'#2d3748',borderRadius:'8px',border:'1px solid #475569'}}>
+                              <div style={{flex:1,minWidth:0}}>
+                                <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'4px',flexWrap:'wrap'}}>
+                                  <div style={{fontSize:'14px',fontWeight:'500',color:'#f1f5f9',wordBreak:'break-word'}}>{food.text}</div>
+                                  {food.isMeal && <span style={{fontSize:'11px',fontWeight:'600',color:'#93c5fd',background:'#1e3a8a',padding:'2px 6px',borderRadius:'8px',whiteSpace:'nowrap'}}>🍽️ Meal</span>}
+                                  {food.protein && <span style={{fontSize:'11px',fontWeight:'600',color:'#86efac',background:'#14532d',padding:'2px 6px',borderRadius:'8px',whiteSpace:'nowrap'}}>{food.protein}g protein</span>}
+                                  {count > 1 && <span style={{fontSize:'11px',fontWeight:'600',color:'#f59e0b',background:'#92400e',padding:'2px 6px',borderRadius:'8px',whiteSpace:'nowrap'}}>{count}×</span>}
+                                </div>
+                                <div style={{fontSize:'12px',color:'#94a3b8'}}>{food.time}</div>
+                              </div>
+                              <button onClick={() => deleteFood(food.id)} style={{background:'none',border:'none',cursor:'pointer',padding:'8px',color:'#94a3b8',fontSize:'20px',flexShrink:0,marginLeft:'8px'}}>×</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {activeTab === 'sleep' && (
+                    <div style={{background:'#1e293b',borderRadius:'12px',padding:'16px',boxShadow:'0 4px 20px rgba(0,0,0,0.1)'}}>
+                      <h2 style={{margin:'0 0 16px 0',fontSize:'18px',fontWeight:'600',color:'white'}}>Sleep Schedule</h2>
+                      <div style={{display:'flex',gap:'8px',marginBottom:'16px',flexDirection:'column'}}>
+                        <input type="time" value={inputs.bedtime} onChange={(e) => setInputs({...inputs, bedtime: e.target.value})} style={{width:'100%',padding:'12px',border:'1px solid #475569',borderRadius:'8px',fontSize:'14px'}} />
+                        <button onClick={saveBedtime} style={{background:'#667eea',color:'white',border:'none',padding:'12px',borderRadius:'8px',fontSize:'14px',fontWeight:'600',cursor:'pointer',width:'100%'}}>Save Bedtime</button>
+                      </div>
+                      {bedtime ? (
+                        <div style={{padding:'24px',background:'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',borderRadius:'12px',textAlign:'center',color:'white'}}>
+                          <div style={{fontSize:'40px',marginBottom:'8px'}}>🌙</div>
+                          <div style={{fontSize:'12px',marginBottom:'6px',opacity:0.9}}>Bedtime</div>
+                          <div style={{fontSize:'36px',fontWeight:'700',fontFamily:'monospace'}}>
+                            {new Date(`2000-01-01T${bedtime}`).toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit',hour12:true})}
+                          </div>
+                        </div>
+                      ) : <p style={{textAlign:'center',color:'#94a3b8',padding:'32px 16px',fontSize:'14px'}}>No bedtime set!</p>}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {activeView === 'calendar' && (
+                <>
+                  {/* Monthly Stats */}
+                  {monthlyStats && !calendarLoading && (
+                    <div style={{background:'#1e293b',borderRadius:'12px',padding:'16px',marginBottom:'12px',boxShadow:'0 4px 20px rgba(0,0,0,0.1)'}}>
+                      <h3 style={{margin:'0 0 16px 0',fontSize:'16px',fontWeight:'600',color:'#f1f5f9'}}>📊 Month Summary</h3>
+                      
+                      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(100px, 1fr))',gap:'12px',marginBottom:'16px'}}>
+                        <div style={{background:'#14532d',padding:'12px',borderRadius:'8px',border:'1px solid #22c55e'}}>
+                          <div style={{fontSize:'10px',fontWeight:'600',color:'#86efac',marginBottom:'4px'}}>Days Tracked</div>
+                          <div style={{fontSize:'20px',fontWeight:'700',color:'#86efac'}}>{monthlyStats.daysTracked}/{monthlyStats.totalDays}</div>
+                        </div>
+                        <div style={{background:'#1e3a8a',padding:'12px',borderRadius:'8px',border:'1px solid #93c5fd'}}>
+                          <div style={{fontSize:'10px',fontWeight:'600',color:'#93c5fd',marginBottom:'4px'}}>Total Tasks</div>
+                          <div style={{fontSize:'20px',fontWeight:'700',color:'#93c5fd'}}>{monthlyStats.totalTasks}</div>
+                        </div>
+                        <div style={{background:'#7c2d12',padding:'12px',borderRadius:'8px',border:'1px solid #fdba74'}}>
+                          <div style={{fontSize:'10px',fontWeight:'600',color:'#fdba74',marginBottom:'4px'}}>Total Meals</div>
+                          <div style={{fontSize:'20px',fontWeight:'700',color:'#fdba74'}}>{monthlyStats.totalFoods}</div>
+                        </div>
+                      </div>
+
+                      {monthlyStats.topTasks.length > 0 && (
+                        <div style={{marginBottom:'12px'}}>
+                          <div style={{fontSize:'12px',fontWeight:'600',color:'#cbd5e1',marginBottom:'8px'}}>🏆 Top Tasks This Month</div>
+                          <div style={{display:'flex',flexDirection:'column',gap:'6px'}}>
+                            {monthlyStats.topTasks.map(([task, count], i) => (
+                              <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:'#2d3748',borderRadius:'6px',border:'1px solid #475569'}}>
+                                <span style={{fontSize:'13px',color:'#f1f5f9',textTransform:'capitalize'}}>#{i+1} {task}</span>
+                                <span style={{fontSize:'12px',fontWeight:'600',color:'#667eea',background:'#dbeafe',padding:'2px 8px',borderRadius:'8px'}}>{count}×</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {monthlyStats.topFoods.length > 0 && (
+                        <div>
+                          <div style={{fontSize:'12px',fontWeight:'600',color:'#cbd5e1',marginBottom:'8px'}}>🍽️ Top Foods This Month</div>
+                          <div style={{display:'flex',flexDirection:'column',gap:'6px'}}>
+                            {monthlyStats.topFoods.map(([food, count], i) => (
+                              <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:'#2d3748',borderRadius:'6px',border:'1px solid #475569'}}>
+                                <span style={{fontSize:'13px',color:'#f1f5f9',textTransform:'capitalize'}}>#{i+1} {food}</span>
+                                <span style={{fontSize:'12px',fontWeight:'600',color:'#f59e0b',background:'#92400e',padding:'2px 8px',borderRadius:'8px'}}>{count}×</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {monthlyStats.bedtimesList && monthlyStats.bedtimesList.length > 0 && (
+                        <div style={{marginTop:'12px'}}>
+                          <div style={{fontSize:'12px',fontWeight:'600',color:'#cbd5e1',marginBottom:'8px'}}>🌙 Bedtimes This Month</div>
+                          <div style={{display:'flex',flexDirection:'column',gap:'6px',maxHeight:'200px',overflowY:'auto'}}>
+                            {monthlyStats.bedtimesList.map((entry, i) => {
+                              const parts = entry.time.split(':');
+                              let hours = parseInt(parts[0]);
+                              const minutes = parts[1];
+                              const ampm = hours >= 12 ? 'PM' : 'AM';
+                              hours = hours % 12 || 12;
+                              const formatted = hours + ':' + minutes + ' ' + ampm;
+                              return (
+                                <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:'#581c87',borderRadius:'6px',border:'1px solid #a855f7'}}>
+                                  <span style={{fontSize:'13px',color:'#f1f5f9'}}>Day {entry.date}</span>
+                                  <span style={{fontSize:'13px',fontWeight:'600',color:'#7c3aed',fontFamily:'monospace'}}>{formatted}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <div style={{marginTop:'8px',fontSize:'11px',color:'#94a3b8',textAlign:'center'}}>{monthlyStats.bedtimesList.length} nights tracked</div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Calendar Grid */}
+                  <div style={{background:'#1e293b',borderRadius:'12px',padding:'16px',boxShadow:'0 4px 20px rgba(0,0,0,0.1)'}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
+                      <button onClick={previousMonth} style={{background:'#475569',border:'none',padding:'10px 14px',borderRadius:'8px',cursor:'pointer',fontSize:'18px',fontWeight:'600',color:'#cbd5e1'}}>←</button>
+                      <h2 style={{fontSize:'clamp(16px, 4vw, 18px)',fontWeight:'600',color:'#f1f5f9',margin:0,textAlign:'center',flex:1}}>{monthName}</h2>
+                      <button onClick={nextMonth} style={{background:'#475569',border:'none',padding:'10px 14px',borderRadius:'8px',cursor:'pointer',fontSize:'18px',fontWeight:'600',color:'#cbd5e1'}}>→</button>
+                    </div>
+
+                    {calendarLoading ? (
+                      <div style={{textAlign:'center',padding:'40px',color:'#94a3b8'}}>Loading...</div>
+                    ) : (
+                      <>
+                        <div style={{display:'grid',gridTemplateColumns:'repeat(7, 1fr)',gap:'4px',marginBottom:'4px'}}>
+                          {['S','M','T','W','T','F','S'].map(day => (
+                            <div key={day} style={{textAlign:'center',fontSize:'11px',fontWeight:'600',color:'#94a3b8',padding:'6px 0'}}>{day}</div>
+                          ))}
+                        </div>
+                        <div style={{display:'grid',gridTemplateColumns:'repeat(7, 1fr)',gap:'4px'}}>
+                          {Array(firstDay).fill(null).map((_, i) => <div key={`empty-${i}`} style={{aspectRatio:'1'}} />)}
+                          {Array(daysInMonth).fill(null).map((_, i) => {
+                            const day = i + 1;
+                            const dateStr = `${currentMonth.getFullYear()}-${String(currentMonth.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                            const isToday = dateStr === today;
+                            const dayData = calendarData[day] || {};
+                            const hasAny = dayData.hasTasks || dayData.hasFoods || dayData.hasBedtime;
+
+                            return (
+                              <div key={day} style={{aspectRatio:'1',border:isToday?'2px solid #8b5cf6':'1px solid #475569',borderRadius:'6px',padding:'4px',background:hasAny?'#14532d':'#334155',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'40px'}}>
+                                <div style={{fontSize:'clamp(11px, 2.5vw, 13px)',fontWeight:'600',color:'#f1f5f9',marginBottom:'2px'}}>{day}</div>
+                                <div style={{display:'flex',gap:'2px',flexWrap:'wrap',justifyContent:'center'}}>
+                                  {dayData.hasTasks && <div style={{width:'5px',height:'5px',borderRadius:'50%',background:'#10b981'}} />}
+                                  {dayData.hasFoods && <div style={{width:'5px',height:'5px',borderRadius:'50%',background:'#f59e0b'}} />}
+                                  {dayData.hasBedtime && <div style={{width:'5px',height:'5px',borderRadius:'50%',background:'#8b5cf6'}} />}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{marginTop:'16px',display:'flex',gap:'12px',fontSize:'11px',color:'#cbd5e1',justifyContent:'center',flexWrap:'wrap'}}>
+                          <div style={{display:'flex',alignItems:'center',gap:'4px'}}><div style={{width:'8px',height:'8px',borderRadius:'50%',background:'#10b981'}} />Tasks</div>
+                          <div style={{display:'flex',alignItems:'center',gap:'4px'}}><div style={{width:'8px',height:'8px',borderRadius:'50%',background:'#f59e0b'}} />Food</div>
+                          <div style={{display:'flex',alignItems:'center',gap:'4px'}}><div style={{width:'8px',height:'8px',borderRadius:'50%',background:'#8b5cf6'}} />Sleep</div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <style>{`
+            @media (min-width: 768px) {
+              .mobile-only {
+                display: none !important;
+              }
+            }
+          `}</style>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
